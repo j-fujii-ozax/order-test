@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Smart Order Optimizer v2.3</title>
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+    <py-config>
+        packages = ["pandas", "numpy"]
+    </py-config>
+    <style>
+        :root { --primary: #1a73e8; --success: #34a853; --warning: #fbbc04; --danger: #ea4335; --bg: #f8f9fa; }
+        body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg); margin: 0; padding: 20px; color: #3c4043; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 30px; border-radius: 16px; box-shadow: 0 4px 25px rgba(0,0,0,0.05); }
+        header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid #e1e4e8; padding-bottom: 15px; }
+        h1 { font-size: 24px; color: var(--primary); margin: 0; display: flex; align-items: center; gap: 10px; }
+        .status-badge { font-size: 12px; padding: 4px 12px; border-radius: 20px; background: #e8f0fe; color: var(--primary); font-weight: bold; }
+        .card { background: #fff; border: 1px solid #dadce0; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; }
+        label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px; color: #5f6368; }
+        textarea, input[type="file"] { width: 100%; border: 1px solid #dadce0; border-radius: 8px; padding: 12px; box-sizing: border-box; font-size: 13px; }
+        textarea { height: 100px; font-family: 'Cascadia Code', monospace; background: #f8f9fa; }
+        .btn { padding: 12px 24px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; display: inline-flex; align-items: center; gap: 8px; justify-content: center; }
+        .btn-primary { background: var(--primary); color: white; width: 100%; }
+        .btn-success { background: white; border: 2px solid var(--success); color: var(--success); display: none; margin-left: auto; width: 320px; }
+        .btn-success:hover { background: #e6f4ea; }
+        .supplier-block { margin-top: 40px; border: 1px solid #e0e0e0; border-radius: 12px; overflow: hidden; background: white; }
+        .supplier-header { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; }
+        .alert-box { padding: 15px 20px; font-size: 14px; display: flex; align-items: center; justify-content: space-between; transition: 0.2s; }
+        .alert-warning { background: #fef7e0; color: #b06000; border-bottom: 2px solid #ffcc00; }
+        .alert-success { background: #e6f4ea; color: #137333; border-bottom: 2px solid var(--success); }
+        .alert-danger { background: #fce8e6; color: var(--danger); border-bottom: 2px solid var(--danger); font-weight: bold; }
+        table { width: 100%; border-collapse: collapse; }
+        th { background: #fafafa; padding: 12px; text-align: center; font-size: 12px; color: #5f6368; border-bottom: 1px solid #eee; }
+        td { padding: 10px; border-bottom: 1px solid #f1f3f4; text-align: center; }
+        .editable-qty { width: 90px; padding: 8px; border: 2px solid var(--primary); border-radius: 6px; text-align: center; font-weight: bold; font-size: 16px; background: #fff; color: #333; }
+        .summary-val { font-size: 22px; font-weight: 800; margin-left: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>📦 Smart Order Optimizer <span id="init-badge" class="status-badge">Initializing Python...</span></h1>
+    </header>
+
+    <div class="grid">
+        <div class="card">
+            <label>1. 需要予測CSVを選択</label>
+            <input type="file" id="upload-file" accept=".csv">
+            <div style="margin-top:20px;">
+                <button id="run-btn" class="btn btn-primary">⚡ 発注計算を実行</button>
+            </div>
+        </div>
+        <div class="card">
+            <label>2. サプライヤー設定マスタ (編集可)</label>
+            <textarea id="supplier-master">サプライヤー名,合計MOQ,休日リスト
+食品卸A,50,"2025/12/31,2026/01/01"
+飲料B,30,"2025/12/30"
+雑貨C,100,"日曜"</textarea>
+        </div>
+    </div>
+
+    <div id="output-area"></div>
+    
+    <div style="display: flex; margin-top: 40px; border-top: 1px solid #eee; padding-top: 20px;">
+        <button id="download-btn" class="btn btn-success">💾 統合CSVをダウンロード</button>
+    </div>
+</div>
+
+<script type="py">
+import pandas as pd
+import io
+import math
+from datetime import datetime
+from pyscript import when, document
+from js import Blob, URL, document as js_doc, Uint8Array
+
+# グローバル変数
+final_df = None
+
+# ロード完了通知
+document.getElementById("init-badge").innerHTML = "Ready"
+
+def update_ui(supplier_name):
+    """特定のサプライヤーの合計とアラート表示を更新する"""
+    moq_el = js_doc.querySelector(f'[data-supplier-moq="{supplier_name}"]')
+    if not moq_el: return
+    moq = int(moq_el.innerHTML)
+    
+    # 該当サプライヤーの入力をすべて集計
+    inputs = js_doc.querySelectorAll(f'input[data-supplier="{supplier_name}"]')
+    total = 0
+    for inp in inputs:
+        try:
+            total += int(inp.value or 0)
+        except:
+            pass
+    
+    # UIの更新
+    alert_div = js_doc.getElementById(f"alert-{supplier_name}")
+    total_span = js_doc.getElementById(f"total-{supplier_name}")
+    if total_span: total_span.innerHTML = str(total)
+    
+    msg_text = alert_div.querySelector(".msg-text")
+    if total < moq:
+        alert_div.className = "alert-box alert-danger"
+        msg_text.innerHTML = f"⚠️ <strong>MOQ不足！</strong> あと {moq - total} ケース足りません。"
+    else:
+        alert_div.className = "alert-box alert-success"
+        msg_text.innerHTML = f"✅ <strong>条件クリア:</strong> 目標MOQを満たしています。"
+
+@when("input", "#output-area")
+def on_input_change(event):
+    """
+    重要：イベントデリゲーション
+    親要素(#output-area)で入力を監視し、中身が書き換わったら再計算する
+    """
+    target = event.target
+    if target.classList.contains("editable-qty"):
+        s_name = target.getAttribute("data-supplier")
+        update_ui(s_name)
+
+@when("click", "#run-btn")
+async def process_batch(event):
+    global final_df
+    
+    # 設定取得
+    master_text = document.getElementById("supplier-master").value
+    df_m = pd.read_csv(io.StringIO(master_text))
+    
+    # CSV読み込み
+    file_list = document.getElementById("upload-file").files
+    if len(file_list) == 0: return
+    csv_text = await file_list.item(0).text()
+    df_in = pd.read_csv(io.StringIO(csv_text))
+    
+    output_div = document.getElementById("output-area")
+    output_div.innerHTML = ""
+    all_chunks = []
+
+    for _, master in df_m.iterrows():
+        s_name = master['サプライヤー名']
+        moq = int(master['合計MOQ'])
+
+        df_s = df_in[df_in['サプライヤー名'] == s_name].copy()
+        if df_s.empty: continue
+
+        # 結束単位による自動補正
+        df_s['補正後発注数'] = df_s.apply(lambda x: math.ceil(x['予測数'] / x['結束単位']) * x['結束単位'], axis=1)
+        
+        # 初回のMOQ自動調整（足りない分を一番上の商品に足す）
+        current_total = df_s['補正後発注数'].sum()
+        if current_total < moq:
+            df_s.loc[df_s.index[0], '補正後発注数'] += (moq - current_total)
+
+        total_now = int(df_s['補正後発注数'].sum())
+        status_cls = "alert-success" if total_now >= moq else "alert-danger"
+        status_msg = "✅ 条件クリア" if total_now >= moq else "⚠️ MOQ不足"
+
+        # HTML生成
+        section_html = f"""
+        <div class="supplier-block">
+            <div class="supplier-header">
+                <span style="font-weight:bold; font-size:20px; color:#202124;">{s_name}</span>
+                <span style="font-size:14px; color:#5f6368;">目標MOQ: <span data-supplier-moq="{s_name}">{moq}</span> ケース</span>
+            </div>
+            <div id="alert-{s_name}" class="alert-box {status_cls}">
+                <span class="msg-text">{status_msg}</span>
+                <span>現在合計: <span id="total-{s_name}" class="summary-val">{total_now}</span> ケース</span>
+            </div>
+            <table>
+                <thead>
+                    <tr><th>商品名</th><th>日付</th><th>予測数</th><th>結束単位</th><th>発注数修正</th></tr>
+                </thead>
+                <tbody>
+        """
+        for i, row in df_s.iterrows():
+            section_html += f"""
+                <tr>
+                    <td>{row['商品名']}</td><td>{row['日付']}</td><td>{row['予測数']}</td><td>{row['結束単位']}合</td>
+                    <td><input type="number" class="editable-qty" data-supplier="{s_name}" data-idx="{i}" value="{int(row['補正後発注数'])}"></td>
+                </tr>
+            """
+        section_html += "</tbody></table></div>"
+        output_div.innerHTML += section_html
+        all_chunks.append(df_s)
+
+    final_df = pd.concat(all_chunks)
+    document.getElementById("download-btn").style.display = "inline-flex"
+
+@when("click", "#download-btn")
+def download_csv(event):
+    global final_df
+    if final_df is None: return
+
+    # 画面上の「現在」の値をDataFrameに反映
+    inputs = js_doc.querySelectorAll(".editable-qty")
+    for inp in inputs:
+        idx = int(inp.getAttribute("data-idx"))
+        final_df.at[idx, '補正後発注数'] = int(inp.value or 0)
+
+    # タイムスタンプ作成
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"OrderList_{ts}.csv"
+
+    # --- Excel文字化け対策 (BOM付きUTF-8) ---
+    csv_str = final_df.to_csv(index=False, encoding='utf-8-sig')
+    bom = b'\xef\xbb\xbf'
+    csv_bytes = bom + csv_str.encode('utf-8')
+    
+    js_array = Uint8Array.new(len(csv_bytes))
+    for i, b in enumerate(csv_bytes):
+        js_array[i] = b
+        
+    blob = Blob.new([js_array], {type: 'text/csv;charset=utf-8'})
+    url = URL.createObjectURL(blob)
+    link = js_doc.createElement('a')
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+</script>
+
+</body>
+</html>
